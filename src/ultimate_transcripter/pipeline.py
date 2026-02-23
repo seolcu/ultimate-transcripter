@@ -229,7 +229,7 @@ def _merge_segments(
                 if candidate is not None:
                     merged.append(candidate)
         else:
-            text = str(payload.get("text") or "").strip()
+            text = _sanitize_text(str(payload.get("text") or ""))
             if text:
                 merged.append(
                     TranscriptSegment(
@@ -296,7 +296,7 @@ def _dedupe_segments(segments: list[TranscriptSegment]) -> list[TranscriptSegmen
 def _compose_text(segments: list[TranscriptSegment]) -> str:
     pieces: list[str] = []
     for segment in segments:
-        text = segment.text.strip()
+        text = _sanitize_text(segment.text)
         if not text:
             continue
         if not pieces:
@@ -349,6 +349,56 @@ def _safe_load_json(path: Path) -> dict[str, Any] | None:
 
 def _normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _sanitize_text(value: str) -> str:
+    normalized = _normalize_spaces(value)
+    if not normalized:
+        return ""
+    return _trim_repeated_tail_words(normalized)
+
+
+def _trim_repeated_tail_words(text: str) -> str:
+    words = text.split(" ")
+    if len(words) < 6:
+        return text
+
+    max_window = min(24, len(words) // 3)
+    while True:
+        trimmed = False
+        for window in range(1, max_window + 1):
+            repeat_count = _count_tail_repeats(words, window)
+            if repeat_count < 3:
+                continue
+
+            keep_until = len(words) - (window * (repeat_count - 1))
+            words = words[:keep_until]
+            trimmed = True
+            break
+
+        if not trimmed:
+            break
+        if len(words) < 6:
+            break
+        max_window = min(24, len(words) // 3)
+
+    return " ".join(words)
+
+
+def _count_tail_repeats(words: list[str], window: int) -> int:
+    if window <= 0 or len(words) < window * 2:
+        return 1
+
+    target = words[-window:]
+    repeats = 1
+    cursor = len(words) - (window * 2)
+    while cursor >= 0:
+        candidate = words[cursor : cursor + window]
+        if candidate != target:
+            break
+        repeats += 1
+        cursor -= window
+    return repeats
 
 
 def _canonical_text(value: str) -> str:

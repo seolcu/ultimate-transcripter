@@ -36,15 +36,50 @@ class OpenAITranscriptionClient:
         language: str | None,
         prompt: str | None,
     ) -> dict[str, Any]:
+        payload_or_error = None
+        for response_format, include_segment_timestamps in (
+            ("verbose_json", True),
+            ("json", False),
+        ):
+            try:
+                return self._transcribe_with_retry(
+                    audio_path=audio_path,
+                    language=language,
+                    prompt=prompt,
+                    response_format=response_format,
+                    include_segment_timestamps=include_segment_timestamps,
+                )
+            except TranscriptionAPIError as exc:
+                payload_or_error = exc
+                if response_format == "verbose_json" and _is_unsupported_response_format_error(
+                    str(exc)
+                ):
+                    continue
+                raise
+
+        if isinstance(payload_or_error, TranscriptionAPIError):
+            raise payload_or_error
+        raise TranscriptionAPIError("Failed to transcribe")
+
+    def _transcribe_with_retry(
+        self,
+        *,
+        audio_path: Path,
+        language: str | None,
+        prompt: str | None,
+        response_format: str,
+        include_segment_timestamps: bool,
+    ) -> dict[str, Any]:
         url = f"{self.api_base}/audio/transcriptions"
         mime_type = mimetypes.guess_type(audio_path.name)[0] or "application/octet-stream"
 
         base_data: list[tuple[str, str]] = [
             ("model", self.model),
-            ("response_format", "verbose_json"),
+            ("response_format", response_format),
             ("temperature", "0"),
-            ("timestamp_granularities[]", "segment"),
         ]
+        if include_segment_timestamps:
+            base_data.append(("timestamp_granularities[]", "segment"))
         if language:
             base_data.append(("language", language))
         if prompt:
@@ -123,3 +158,8 @@ class OpenAITranscriptionClient:
         base = min(2 ** (attempt - 1), 30)
         jitter = random.uniform(0.0, 0.35)
         time.sleep(base + jitter)
+
+
+def _is_unsupported_response_format_error(message: str) -> bool:
+    text = message.lower()
+    return "response_format" in text and "not compatible" in text
