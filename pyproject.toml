@@ -5,8 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ultimate-transcripter"
 version = "0.1.0"
-description = "Quality-first BYOK CLI for large audio transcription"
+description = "Quality-first BYOK transcription toolset for large audio files"
 readme = "AGENTS.md"
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
   "requests>=2.32.0",
@@ -14,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 ultimate-transcripter = "ultimate_transcripter.cli:main"
+ultimate-transcripter-gui = "ultimate_transcripter.gui:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

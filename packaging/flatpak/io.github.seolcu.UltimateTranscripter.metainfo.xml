@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.seolcu.UltimateTranscripter</id>
+  <name>Ultimate Transcripter</name>
+  <summary>Transcribe long-form audio with cloud speech APIs</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="io.github.seolcu">
+    <name>seolcu</name>
+  </developer>
+  <launchable type="desktop-id">io.github.seolcu.UltimateTranscripter.desktop</launchable>
+  <description>
+    <p>
+      Ultimate Transcripter is a Linux transcription app focused on long audio,
+      resumable processing, and runtime BYOK API keys.
+    </p>
+  </description>
+  <url type="homepage">https://github.com/seolcu/ultimate-transcripter</url>
+  <url type="bugtracker">https://github.com/seolcu/ultimate-transcripter/issues</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Utility</category>
+  </categories>
+  <releases>
+    <release version="0.1.0" date="2026-02-23"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

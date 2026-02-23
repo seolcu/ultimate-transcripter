@@ -10,3 +10,11 @@ dist/
 *.egg-info/
 
 *_transcript/
+*_test/
+smoke_test_transcript/
+
+# local audio samples and generated media
+*.m4a
+*.mp3
+*.wav
+*.flac

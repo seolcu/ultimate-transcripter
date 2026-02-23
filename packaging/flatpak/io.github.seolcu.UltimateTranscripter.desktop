@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Ultimate Transcripter
+Comment=Transcribe long audio files with cloud speech APIs
+Exec=ultimate-transcripter-gui
+Icon=io.github.seolcu.UltimateTranscripter
+Categories=AudioVideo;
+StartupNotify=true
+Terminal=false

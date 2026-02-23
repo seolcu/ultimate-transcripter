@@ -37,6 +37,7 @@ class TranscriptSegment:
 class PipelineConfig:
     input_path: Path
     output_dir: Path
+    provider: str
     model: str
     formats: set[str] = field(default_factory=lambda: {"txt", "srt", "json"})
     language: str | None = None
@@ -45,7 +46,7 @@ class PipelineConfig:
     overlap_seconds: int = 8
     keep_temp_chunks: bool = False
     resume: bool = True
-    api_base: str = "https://api.openai.com/v1"
+    api_base: str | None = None
     timeout_seconds: int = 300
     max_retries: int = 6
 

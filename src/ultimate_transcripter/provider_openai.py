@@ -19,13 +19,13 @@ class OpenAITranscriptionClient:
         *,
         api_key: str,
         model: str,
-        api_base: str,
+        api_base: str | None,
         timeout_seconds: int,
         max_retries: int,
     ) -> None:
         self.api_key = api_key
         self.model = model
-        self.api_base = api_base.rstrip("/")
+        self.api_base = (api_base or "https://api.openai.com/v1").rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
 

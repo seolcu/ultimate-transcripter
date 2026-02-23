@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ from ultimate_transcripter.audio import (
     probe_audio,
     require_binary,
 )
+from ultimate_transcripter.provider_assemblyai import AssemblyAITranscriptionClient
 from ultimate_transcripter.provider_openai import OpenAITranscriptionClient
 from ultimate_transcripter.types import (
     ChunkSpec,
@@ -44,13 +46,7 @@ def run_transcription(
         overlap_seconds=config.overlap_seconds,
     )
 
-    client = OpenAITranscriptionClient(
-        api_key=api_key,
-        model=config.model,
-        api_base=config.api_base,
-        timeout_seconds=config.timeout_seconds,
-        max_retries=config.max_retries,
-    )
+    client = _build_transcription_client(config=config, api_key=api_key)
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     state_dir = config.output_dir / ".state"
@@ -58,6 +54,11 @@ def run_transcription(
     state_dir.mkdir(parents=True, exist_ok=True)
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
+    _validate_resume_compatibility(
+        config=config,
+        state_dir=state_dir,
+        duration_seconds=info.duration_seconds,
+    )
     _write_run_manifest(config=config, state_dir=state_dir, duration_seconds=info.duration_seconds)
 
     total = len(chunks)
@@ -169,6 +170,7 @@ def _write_run_manifest(
         "saved_at": _utc_now_iso(),
         "input_file": str(config.input_path),
         "output_dir": str(config.output_dir),
+        "provider": config.provider,
         "model": config.model,
         "language": config.language,
         "chunk_seconds": config.chunk_seconds,
@@ -176,6 +178,46 @@ def _write_run_manifest(
         "duration_seconds": duration_seconds,
     }
     _write_json(manifest_path, payload)
+
+
+def _validate_resume_compatibility(
+    *, config: PipelineConfig, state_dir: Path, duration_seconds: float
+) -> None:
+    manifest_path = state_dir / "run_manifest.json"
+    existing = _safe_load_json(manifest_path)
+    if not existing:
+        return
+
+    existing_provider = existing.get("provider")
+    if existing_provider is None:
+        existing_provider = "openai"
+
+    checks: list[tuple[str, Any, Any]] = [
+        ("input_file", str(config.input_path), existing.get("input_file")),
+        ("provider", config.provider, existing_provider),
+        ("model", config.model, existing.get("model")),
+        ("language", config.language, existing.get("language")),
+        ("chunk_seconds", config.chunk_seconds, existing.get("chunk_seconds")),
+        ("overlap_seconds", config.overlap_seconds, existing.get("overlap_seconds")),
+    ]
+
+    mismatches: list[str] = []
+    for key, expected, actual in checks:
+        if expected != actual:
+            mismatches.append(f"{key}={actual!r} (current: {expected!r})")
+
+    saved_duration = _as_float(existing.get("duration_seconds"), duration_seconds)
+    if abs(saved_duration - duration_seconds) > 1.0:
+        mismatches.append(
+            f"duration_seconds={saved_duration:.3f} (current: {duration_seconds:.3f})"
+        )
+
+    if mismatches and config.resume:
+        details = ", ".join(mismatches)
+        raise RuntimeError(
+            "Existing checkpoint manifest does not match current run options: "
+            f"{details}. Use --no-resume or a different --output-dir."
+        )
 
 
 def _build_chunk_prompt(user_prompt: str | None, previous_tail: str) -> str | None:
@@ -190,6 +232,27 @@ def _build_chunk_prompt(user_prompt: str | None, previous_tail: str) -> str | No
     if not parts:
         return None
     return "\n\n".join(parts)
+
+
+def _build_transcription_client(*, config: PipelineConfig, api_key: str) -> Any:
+    provider = config.provider.strip().lower()
+    if provider == "openai":
+        return OpenAITranscriptionClient(
+            api_key=api_key,
+            model=config.model,
+            api_base=config.api_base,
+            timeout_seconds=config.timeout_seconds,
+            max_retries=config.max_retries,
+        )
+    if provider == "assemblyai":
+        return AssemblyAITranscriptionClient(
+            api_key=api_key,
+            model=config.model,
+            api_base=config.api_base,
+            timeout_seconds=config.timeout_seconds,
+            max_retries=config.max_retries,
+        )
+    raise RuntimeError(f"Unsupported provider: {config.provider}")
 
 
 def _tail_text(text: str, *, limit: int) -> str:
@@ -241,7 +304,7 @@ def _merge_segments(
                 )
 
     merged.sort(key=lambda seg: (seg.start, seg.end))
-    return _dedupe_segments(merged)
+    return _filter_segments(_dedupe_segments(merged))
 
 
 def _fit_segment_to_logical_window(
@@ -261,10 +324,14 @@ def _fit_segment_to_logical_window(
     clipped_end = min(end, logical_end)
     if clipped_end <= clipped_start:
         clipped_end = clipped_start + 0.01
+    cleaned_text = _sanitize_text(text)
+    if not cleaned_text:
+        return None
+
     return TranscriptSegment(
         start=clipped_start,
         end=clipped_end,
-        text=_normalize_spaces(text),
+        text=cleaned_text,
         chunk_index=chunk_index,
     )
 
@@ -304,6 +371,8 @@ def _compose_text(segments: list[TranscriptSegment]) -> str:
             continue
 
         prev = pieces[-1]
+        if _canonical_text(prev) == _canonical_text(text):
+            continue
         if text[0] in ".,!?;:)":
             pieces[-1] = prev + text
         elif prev.endswith(("-", "'", "\"", "(")):
@@ -312,7 +381,7 @@ def _compose_text(segments: list[TranscriptSegment]) -> str:
             pieces.append(text)
 
     merged = " ".join(pieces)
-    return _normalize_spaces(merged)
+    return _sanitize_document_text(merged)
 
 
 def _to_srt(segments: list[TranscriptSegment]) -> str:
@@ -353,9 +422,213 @@ def _normalize_spaces(value: str) -> str:
 
 def _sanitize_text(value: str) -> str:
     normalized = _normalize_spaces(value)
+    normalized = normalized.replace("\uFFFD", "").strip()
     if not normalized:
         return ""
-    return _trim_repeated_tail_words(normalized)
+
+    collapsed = _collapse_repeated_spans(normalized, max_window=12, min_repeats=3)
+    trimmed = _trim_repeated_tail_words(collapsed)
+    if not trimmed:
+        return ""
+    if _is_low_information_text(trimmed):
+        return ""
+    return _trim_fragment_tail(trimmed)
+
+
+def _sanitize_document_text(value: str) -> str:
+    normalized = _normalize_spaces(value)
+    normalized = normalized.replace("\uFFFD", "").strip()
+    if not normalized:
+        return ""
+    collapsed = _collapse_repeated_spans(normalized, max_window=20, min_repeats=3)
+    trimmed = _trim_repeated_tail_words(collapsed)
+    return _normalize_spaces(_trim_fragment_tail(trimmed))
+
+
+def _filter_segments(segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
+    filtered: list[TranscriptSegment] = []
+    for segment in segments:
+        cleaned = _sanitize_text(segment.text)
+        if not cleaned:
+            continue
+
+        current = TranscriptSegment(
+            start=segment.start,
+            end=segment.end,
+            text=cleaned,
+            chunk_index=segment.chunk_index,
+        )
+        if filtered:
+            previous = filtered[-1]
+            same_text = _canonical_text(previous.text) == _canonical_text(current.text)
+            close_gap = (current.start - previous.end) <= 4.0
+            if same_text and close_gap:
+                filtered[-1] = TranscriptSegment(
+                    start=previous.start,
+                    end=max(previous.end, current.end),
+                    text=previous.text,
+                    chunk_index=previous.chunk_index,
+                )
+                continue
+
+        filtered.append(current)
+    return filtered
+
+
+def _collapse_repeated_spans(text: str, *, max_window: int, min_repeats: int) -> str:
+    words = [word for word in text.split(" ") if word]
+    if len(words) < (min_repeats * 2):
+        return text
+
+    collapsed_words = _collapse_repeated_word_spans(
+        words,
+        max_window=max_window,
+        min_repeats=min_repeats,
+    )
+    return " ".join(collapsed_words)
+
+
+def _collapse_repeated_word_spans(
+    words: list[str],
+    *,
+    max_window: int,
+    min_repeats: int,
+) -> list[str]:
+    normalized_words = [_word_key(word) for word in words]
+    output: list[str] = []
+    index = 0
+
+    while index < len(words):
+        collapsed = False
+        max_window_here = min(max_window, (len(words) - index) // min_repeats)
+
+        for window in range(1, max_window_here + 1):
+            pattern = normalized_words[index : index + window]
+            if not pattern or all(not token for token in pattern):
+                continue
+
+            repeats = _count_consecutive_span_repeats(
+                normalized_words,
+                start=index,
+                window=window,
+            )
+            if repeats < min_repeats:
+                continue
+
+            output.extend(words[index : index + window])
+            index += window * repeats
+            collapsed = True
+            break
+
+        if collapsed:
+            continue
+        output.append(words[index])
+        index += 1
+
+    return output
+
+
+def _count_consecutive_span_repeats(words: list[str], *, start: int, window: int) -> int:
+    if window <= 0:
+        return 1
+    if start + window > len(words):
+        return 1
+
+    pattern = words[start : start + window]
+    repeats = 1
+    cursor = start + window
+    while cursor + window <= len(words):
+        candidate = words[cursor : cursor + window]
+        if candidate != pattern:
+            break
+        repeats += 1
+        cursor += window
+    return repeats
+
+
+def _is_low_information_text(text: str) -> bool:
+    raw_words = [token for token in text.split(" ") if token]
+    if len(raw_words) < 12:
+        return False
+
+    words = [_word_key(word) for word in raw_words]
+    words = [word for word in words if word]
+    if len(words) < 12:
+        return False
+
+    unique_ratio = len(set(words)) / float(len(words))
+    if unique_ratio < 0.25:
+        return True
+
+    most_common = Counter(words).most_common(1)
+    if most_common:
+        most_common_ratio = most_common[0][1] / float(len(words))
+        if len(words) >= 12 and most_common_ratio > 0.34:
+            return True
+
+    longest_same_word_run = _longest_consecutive_word_run(words)
+    if longest_same_word_run >= 6:
+        return True
+
+    max_span_repeats = 1
+    max_window = min(8, len(words) // 2)
+    for index in range(len(words)):
+        for window in range(1, max_window + 1):
+            repeats = _count_consecutive_span_repeats(words, start=index, window=window)
+            if repeats > max_span_repeats:
+                max_span_repeats = repeats
+    if max_span_repeats >= 4:
+        return True
+
+    return False
+
+
+def _longest_consecutive_word_run(words: list[str]) -> int:
+    if not words:
+        return 0
+
+    longest = 1
+    current = 1
+    for index in range(1, len(words)):
+        if words[index] == words[index - 1]:
+            current += 1
+            if current > longest:
+                longest = current
+            continue
+        current = 1
+    return longest
+
+
+def _word_key(value: str) -> str:
+    lowered = value.lower()
+    return re.sub(r"[^\w]+", "", lowered, flags=re.UNICODE)
+
+
+def _trim_fragment_tail(text: str) -> str:
+    words = [word for word in text.split(" ") if word]
+    if len(words) < 2:
+        return text
+
+    last_key = _word_key(words[-1])
+    prev_key = _word_key(words[-2])
+    if not last_key:
+        words = words[:-1]
+    elif len(last_key) <= 1 and prev_key.startswith(last_key):
+        words = words[:-1]
+
+    if len(words) >= 3:
+        last_key = _word_key(words[-1])
+        ends_cleanly = text.rstrip().endswith((".", "?", "!", "\"", "'"))
+        if last_key and len(last_key) <= 1 and not ends_cleanly:
+            words = words[:-1]
+            return " ".join(words)
+        if last_key and not ends_cleanly:
+            keys = [_word_key(word) for word in words]
+            key_counts = Counter(key for key in keys if key)
+            if key_counts.get(last_key, 0) >= 2 and len(last_key) <= 8:
+                words = words[:-1]
+
+    return " ".join(words)
 
 
 def _trim_repeated_tail_words(text: str) -> str:

@@ -36,9 +36,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated output formats: txt,srt,json (default: txt,srt,json)",
     )
     transcribe_parser.add_argument(
+        "--provider",
+        default="openai",
+        choices=("openai", "assemblyai"),
+        help="Transcription provider (default: openai)",
+    )
+    transcribe_parser.add_argument(
         "--model",
-        default="gpt-4o-transcribe",
-        help="Transcription model (default: gpt-4o-transcribe)",
+        help="Provider model id (defaults by provider)",
     )
     transcribe_parser.add_argument(
         "--language",
@@ -66,8 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     transcribe_parser.add_argument(
         "--api-base",
-        default="https://api.openai.com/v1",
-        help="API base URL (default: https://api.openai.com/v1)",
+        help="API base URL override (default depends on provider)",
     )
     transcribe_parser.add_argument(
         "--timeout-seconds",
@@ -91,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep temporary chunk files under .chunks",
     )
+
+    subparsers.add_parser(
+        "gui",
+        help="Launch Linux desktop GUI (GTK4/libadwaita).",
+    )
     return parser
 
 
@@ -104,6 +113,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "transcribe":
         return _run_transcribe(args)
+    if args.command == "gui":
+        return _run_gui()
 
     parser.error(f"Unknown command: {args.command}")
     return 2
@@ -136,15 +147,18 @@ def _run_transcribe(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
 
-    api_key = _resolve_api_key(args.api_key)
+    api_key = _resolve_api_key(args.api_key, provider=args.provider)
     if not api_key:
         print("Error: API key is required.", file=sys.stderr)
         return 2
 
+    model = _resolve_model(provider=args.provider, model_arg=args.model)
+
     config = PipelineConfig(
         input_path=input_path,
         output_dir=output_dir,
-        model=args.model,
+        provider=args.provider,
+        model=model,
         formats=formats,
         language=args.language,
         prompt=args.prompt,
@@ -159,9 +173,8 @@ def _run_transcribe(args: argparse.Namespace) -> int:
 
     print(f"Input: {config.input_path}")
     print(f"Output dir: {config.output_dir}")
-    print(
-        f"Model: {config.model} | chunk={config.chunk_seconds}s overlap={config.overlap_seconds}s"
-    )
+    print(f"Provider: {config.provider} | model: {config.model}")
+    print(f"Chunk={config.chunk_seconds}s overlap={config.overlap_seconds}s")
 
     try:
         summary = run_transcription(config=config, api_key=api_key, logger=print)
@@ -202,7 +215,7 @@ def _resolve_output_dir(*, input_path: Path, output_dir_raw: str | None) -> Path
     return input_path.with_name(f"{input_path.stem}_transcript")
 
 
-def _resolve_api_key(api_key_arg: str | None) -> str:
+def _resolve_api_key(api_key_arg: str | None, *, provider: str) -> str:
     api_key = (api_key_arg or "").strip()
     if api_key:
         return api_key
@@ -217,9 +230,28 @@ def _resolve_api_key(api_key_arg: str | None) -> str:
         return ""
 
     try:
-        return getpass.getpass("OpenAI API key (hidden, BYOK, never stored): ").strip()
+        return getpass.getpass(
+            f"{provider} API key (hidden, BYOK, never stored): "
+        ).strip()
     except (EOFError, KeyboardInterrupt):
         return ""
+
+
+def _resolve_model(*, provider: str, model_arg: str | None) -> str:
+    model = (model_arg or "").strip()
+    if model:
+        return model
+    if provider == "openai":
+        return "gpt-4o-transcribe"
+    if provider == "assemblyai":
+        return "universal-2"
+    raise ValueError(f"Unsupported provider: {provider}")
+
+
+def _run_gui() -> int:
+    from ultimate_transcripter.gui import main as gui_main
+
+    return int(gui_main([]))
 
 
 if __name__ == "__main__":
