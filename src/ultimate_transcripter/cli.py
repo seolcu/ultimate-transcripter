@@ -136,9 +136,7 @@ def _run_transcribe(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
 
-    api_key = (args.api_key or "").strip()
-    if not api_key:
-        api_key = getpass.getpass("OpenAI API key (hidden, BYOK, never stored): ").strip()
+    api_key = _resolve_api_key(args.api_key)
     if not api_key:
         print("Error: API key is required.", file=sys.stderr)
         return 2
@@ -202,6 +200,26 @@ def _resolve_output_dir(*, input_path: Path, output_dir_raw: str | None) -> Path
     if output_dir_raw:
         return Path(output_dir_raw).expanduser()
     return input_path.with_name(f"{input_path.stem}_transcript")
+
+
+def _resolve_api_key(api_key_arg: str | None) -> str:
+    api_key = (api_key_arg or "").strip()
+    if api_key:
+        return api_key
+
+    is_tty = bool(sys.stdin and sys.stdin.isatty() and sys.stderr and sys.stderr.isatty())
+    if not is_tty:
+        print(
+            "Error: non-interactive terminal detected. "
+            "Provide --api-key for this run.",
+            file=sys.stderr,
+        )
+        return ""
+
+    try:
+        return getpass.getpass("OpenAI API key (hidden, BYOK, never stored): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
 
 
 if __name__ == "__main__":
